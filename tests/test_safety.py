@@ -53,15 +53,30 @@ class SafetyTest(unittest.IsolatedAsyncioTestCase):
 
     def test_confirmation_is_stronger_for_unbounded_delete(self) -> None:
         self.assertEqual(
-            bot._required_confirmation(None, None),
+            bot._required_confirmation(None, None, all_channels=False),
             bot.DELETE_ALL_CONFIRMATION,
         )
         self.assertEqual(
             bot._required_confirmation(
                 datetime(2026, 6, 30, 0, 0, tzinfo=timezone.utc),
                 None,
+                all_channels=False,
             ),
             bot.DELETE_RANGE_CONFIRMATION,
+        )
+
+    def test_all_channels_confirmation_is_stronger(self) -> None:
+        self.assertEqual(
+            bot._required_confirmation(None, None, all_channels=True),
+            bot.DELETE_ALL_CHANNELS_ALL_CONFIRMATION,
+        )
+        self.assertEqual(
+            bot._required_confirmation(
+                datetime(2026, 6, 30, 0, 0, tzinfo=timezone.utc),
+                None,
+                all_channels=True,
+            ),
+            bot.DELETE_ALL_CHANNELS_RANGE_CONFIRMATION,
         )
 
     def test_daily_usage_store_limits_delete_runs_per_user_per_day(self) -> None:

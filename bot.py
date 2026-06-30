@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 
 DELETE_RANGE_CONFIRMATION = "DELETE MY POSTS"
 DELETE_ALL_CONFIRMATION = "DELETE ALL MY POSTS"
+DELETE_ALL_CHANNELS_RANGE_CONFIRMATION = "DELETE MY POSTS IN ALL CHANNELS"
+DELETE_ALL_CHANNELS_ALL_CONFIRMATION = "DELETE ALL MY POSTS IN ALL CHANNELS"
 DEFAULT_MAX_SCAN = 1_000
 MAX_SCAN_LIMIT = 100_000
 DAILY_DELETE_LIMIT = 3
@@ -34,6 +36,7 @@ logger = logging.getLogger("delete-my-posts-bot")
 class DeletePlan:
     scanned: int
     matched: list[discord.Message]
+    failed_channels: list[str]
 
 
 class DeleteMyPostsBot(commands.Bot):
@@ -206,10 +209,90 @@ async def _build_delete_plan(
             continue
         matched.append(message)
 
-    return DeletePlan(scanned=scanned, matched=matched)
+    return DeletePlan(scanned=scanned, matched=matched, failed_channels=[])
 
 
-def _required_confirmation(start_at: Optional[datetime], end_at: Optional[datetime]) -> str:
+async def _build_multi_channel_delete_plan(
+    channels: list[discord.abc.Messageable],
+    user_id: int,
+    start_at: Optional[datetime],
+    end_at: Optional[datetime],
+    max_scan: Optional[int],
+    include_pinned: bool,
+) -> DeletePlan:
+    total_scanned = 0
+    matched: list[discord.Message] = []
+    failed_channels: list[str] = []
+
+    for channel in channels:
+        try:
+            plan = await _build_delete_plan(
+                channel=channel,
+                user_id=user_id,
+                start_at=start_at,
+                end_at=end_at,
+                max_scan=max_scan,
+                include_pinned=include_pinned,
+            )
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            logger.exception("Failed to scan channel %s", _channel_label(channel))
+            failed_channels.append(_channel_label(channel))
+            continue
+
+        total_scanned += plan.scanned
+        matched.extend(plan.matched)
+
+    return DeletePlan(
+        scanned=total_scanned,
+        matched=matched,
+        failed_channels=failed_channels,
+    )
+
+
+def _channel_label(channel: discord.abc.Messageable) -> str:
+    name = getattr(channel, "name", None)
+    channel_id = getattr(channel, "id", None)
+    if name and channel_id:
+        return f"#{name} ({channel_id})"
+    if channel_id:
+        return str(channel_id)
+    return str(channel)
+
+
+def _select_target_channels(
+    interaction: discord.Interaction,
+    target_channel: Optional[discord.TextChannel],
+    all_channels: bool,
+) -> list[discord.abc.Messageable]:
+    if all_channels:
+        if interaction.guild is None:
+            return []
+        return list(interaction.guild.text_channels)
+    if target_channel is not None:
+        return [target_channel]
+    if interaction.channel is not None and isinstance(
+        interaction.channel,
+        discord.abc.Messageable,
+    ):
+        return [interaction.channel]
+    return []
+
+
+def _scope_label(all_channels: bool, channel_count: int) -> str:
+    if all_channels:
+        return f"全テキストチャンネル ({channel_count} チャンネル)"
+    return "指定チャンネル"
+
+
+def _required_confirmation(
+    start_at: Optional[datetime],
+    end_at: Optional[datetime],
+    all_channels: bool,
+) -> str:
+    if all_channels and start_at is None and end_at is None:
+        return DELETE_ALL_CHANNELS_ALL_CONFIRMATION
+    if all_channels:
+        return DELETE_ALL_CHANNELS_RANGE_CONFIRMATION
     if start_at is None and end_at is None:
         return DELETE_ALL_CONFIRMATION
     return DELETE_RANGE_CONFIRMATION
@@ -252,6 +335,8 @@ async def _delete_messages_safely(
 @app_commands.describe(
     start_datetime="削除範囲の開始日時。例: 2026-06-30 09:00。空なら取得できる最古側まで対象",
     end_datetime="削除範囲の終了日時。例: 2026-06-30 18:30。空なら最新側まで対象",
+    target_channel="削除対象のチャンネル。空ならこのコマンドを実行したチャンネル",
+    all_channels="サーバー内でBotが閲覧できる全テキストチャンネルを対象にする",
     max_scan="最大で確認するメッセージ数。全削除したい場合は大きめに指定",
     include_pinned="ピン留め済みの自分の投稿も削除する",
     confirm="削除実行時の確認文字列。まず空のまま実行して件数確認してください",
@@ -260,6 +345,8 @@ async def delete_my_posts(
     interaction: discord.Interaction,
     start_datetime: Optional[str] = None,
     end_datetime: Optional[str] = None,
+    target_channel: Optional[discord.TextChannel] = None,
+    all_channels: bool = False,
     max_scan: app_commands.Range[int, 0, MAX_SCAN_LIMIT] = DEFAULT_MAX_SCAN,
     include_pinned: bool = False,
     confirm: Optional[str] = None,
@@ -271,10 +358,9 @@ async def delete_my_posts(
         )
         return
 
-    channel = interaction.channel
-    if channel is None or not isinstance(channel, discord.abc.Messageable):
+    if all_channels and target_channel is not None:
         await interaction.response.send_message(
-            "このチャンネルではメッセージ履歴を取得できません。",
+            "`all_channels` と `target_channel` は同時に指定できません。",
             ephemeral=True,
         )
         return
@@ -285,19 +371,27 @@ async def delete_my_posts(
         await interaction.response.send_message(str(exc), ephemeral=True)
         return
 
-    lock_key = (interaction.channel_id or 0, interaction.user.id)
+    target_channels = _select_target_channels(interaction, target_channel, all_channels)
+    if not target_channels:
+        await interaction.response.send_message(
+            "削除対象のチャンネルを取得できませんでした。",
+            ephemeral=True,
+        )
+        return
+
+    lock_key = (interaction.guild_id or 0, interaction.user.id)
     bot = interaction.client
     if not isinstance(bot, DeleteMyPostsBot):
         await interaction.response.send_message("bot の内部状態が不正です。", ephemeral=True)
         return
     if lock_key in bot.delete_locks:
         await interaction.response.send_message(
-            "同じチャンネルであなたの削除処理がすでに実行中です。",
+            "このサーバーであなたの削除処理がすでに実行中です。",
             ephemeral=True,
         )
         return
 
-    required_confirmation = _required_confirmation(start_at, end_at)
+    required_confirmation = _required_confirmation(start_at, end_at, all_channels)
     delete_requested = (confirm or "").strip() == required_confirmation
     today = _today_local()
     remaining_deletes = bot.usage_store.remaining(interaction.user.id, today)
@@ -311,8 +405,8 @@ async def delete_my_posts(
     bot.delete_locks.add(lock_key)
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
-        plan = await _build_delete_plan(
-            channel=channel,
+        plan = await _build_multi_channel_delete_plan(
+            channels=target_channels,
             user_id=interaction.user.id,
             start_at=start_at,
             end_at=end_at,
@@ -325,8 +419,10 @@ async def delete_my_posts(
                 "\n".join(
                     [
                         "削除はまだ実行していません。",
+                        f"対象範囲: {_scope_label(all_channels, len(target_channels))}",
                         f"確認した投稿数: {plan.scanned}",
                         f"削除候補になったあなたの投稿数: {len(plan.matched)}",
+                        f"確認できなかったチャンネル数: {len(plan.failed_channels)}",
                         f"本日の削除実行可能回数: {remaining_deletes}",
                         f"削除するには `confirm` に `{required_confirmation}` を指定して再実行してください。",
                     ]
@@ -344,10 +440,12 @@ async def delete_my_posts(
             "\n".join(
                 [
                     "削除処理が完了しました。",
+                    f"対象範囲: {_scope_label(all_channels, len(target_channels))}",
                     f"確認した投稿数: {plan.scanned}",
                     f"削除対象だったあなたの投稿数: {len(plan.matched)}",
                     f"削除成功: {deleted}",
                     f"削除失敗: {failed}",
+                    f"確認できなかったチャンネル数: {len(plan.failed_channels)}",
                     f"本日の削除実行回数: {used_count}/{DAILY_DELETE_LIMIT}",
                 ]
             ),
