@@ -46,14 +46,13 @@ python bot.py
 
 ## 起動時のエラー
 
-`403 Forbidden (error code: 50001): Missing Access` が出る場合は、スラッシュコマンドをサーバーへ同期できていません。次を確認してください。
+`403 Forbidden (error code: 50001): Missing Access` が出る場合は、スラッシュコマンドを同期できていません。次を確認してください。
 
-- `.env` の `DISCORD_GUILD_ID` が bot を入れたサーバーの ID になっている
 - bot を招待するときに OAuth2 URL Generator で `bot` と `applications.commands` の両方を選んでいる
-- bot がそのサーバーに参加済み
+- bot がサーバーに参加済み
 - 招待URLを作り直して、もう一度サーバーへ追加している
 
-`DISCORD_GUILD_ID` を空にするとグローバルコマンドとして登録しますが、Discord 側の反映に時間がかかる場合があります。
+この bot はグローバルコマンドとして登録します。Discord 側の反映に時間がかかる場合があります。
 
 ## コマンド
 

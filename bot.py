@@ -41,35 +41,17 @@ class DeleteMyPostsBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self.delete_locks: set[tuple[int, int]] = set()
         self.usage_store = DailyUsageStore(USAGE_FILE)
-        self.guild_id = _read_optional_int("DISCORD_GUILD_ID")
 
     async def setup_hook(self) -> None:
         self.tree.add_command(delete_my_posts)
         try:
-            if self.guild_id is not None:
-                guild = discord.Object(id=self.guild_id)
-                self.tree.copy_global_to(guild=guild)
-                await self.tree.sync(guild=guild)
-                logger.info("Synced slash commands to guild %s", self.guild_id)
-            else:
-                await self.tree.sync()
-                logger.info("Synced global slash commands")
+            await self.tree.sync()
+            logger.info("Synced global slash commands")
         except discord.Forbidden as exc:
             raise RuntimeError(
-                "スラッシュコマンドの同期に失敗しました。DISCORD_GUILD_ID が正しいか、"
-                "bot がそのサーバーに `bot` と `applications.commands` の両方の scope で"
-                "招待されているか確認してください。"
+                "スラッシュコマンドの同期に失敗しました。bot を `bot` と "
+                "`applications.commands` の両方の scope で招待しているか確認してください。"
             ) from exc
-
-
-def _read_optional_int(name: str) -> Optional[int]:
-    value = os.getenv(name, "").strip()
-    if not value:
-        return None
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be an integer when set") from exc
 
 
 class DailyUsageStore:
